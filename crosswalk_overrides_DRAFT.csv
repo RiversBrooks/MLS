@@ -1,0 +1,7 @@
+product_id,EventKey,sales_product_description,event_date,basis_DRAFT_verify_before_use
+80063194-df50-ec11-8350-cbcdb06a1ff6,831,18 - Atlas FC at Austin FC 2/16,2022-02-16,"Date matches; event has only 6 scans (scan-capture gap). Map, but exclude from turnout."
+25b6ab34-5560-ed11-83d0-b6ae9e4a74f2,629,18 - Violette AC at Austin FC,2023-03-14,No date in description; only unmapped 2023 event; '18' prefix = non-league match. Verify.
+5aadc7a0-53b2-ef11-84e2-f7d3d7bd1f4c,759,04 - Portland Timbers at Austin FC 4/6,2025-04-05,Description says 4/6 but purchases are 2025 and its EXT/PRK add-ons say 4/5; v2.1 wrongly matched it to 2024-04-06.
+9ac8c0e4-e2f9-ef11-84f4-90b12890b33d,885,18 - El Paso Locomotive FC at Austin FC,2025-05-07,No date in description; only unmapped 2025 spring event; purchases Mar 2025. Verify.
+17790798-5d90-79c7-f2ad-08ddebd1fd80,604,2025 - Round 1 Game 2 (LAFC at Austin FC),2025-11-02,Playoff product; purchases late Oct 2025. Verify.
+a9540401-009b-938d-7a6d-08de1d6318b2,1139,18 - NYCFC at Austin FC 2/1,2026-02-01,"Date matches; low scan share (38.5%) reflects low scans (5,624). Confirm with club."

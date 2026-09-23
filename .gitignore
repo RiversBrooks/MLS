@@ -1,0 +1,15 @@
+# NEVER commit client data or anything derived from it at row level
+data/
+*.csv
+*.xlsx
+*.xls
+*.parquet
+*.duckdb
+account_bridge_LOCAL_ONLY*
+TVOF_audit_results_*
+account_bridge_summary_*
+# exception: the hand-built event crosswalk (no personal data)
+!crosswalk_overrides_DRAFT.csv
+__pycache__/
+.ipynb_checkpoints/
+.venv/
