@@ -18,6 +18,7 @@ Reproducible audit and fan-value pipeline over the four client CSVs (Fan Info, W
 | `tvof_fan_statements.py` | Five value statements: fan contribution, cohort revenue triangle, revenue bridge 2022 to 2025, capacity utilization, customer equity | `value_statements_<date>.xlsx` |
 | `tvof_ltv_montecarlo.py` | 20,000-run Monte Carlo around the LTV and customer-equity point estimates | `ltv_montecarlo_<date>.xlsx` |
 | `tvof_ltv_validation.py` | Rolling-origin backtest of the chain ladder and the Monte Carlo, tornado sensitivity, Sobol variance decomposition | `ltv_validation_<date>.xlsx` |
+| `tvof_results_table.py` | Stacks every sheet of the latest results workbook of each kind (plus the small aggregate CSVs) into one long table that filters on every column | `results_master_<date>.xlsx` + `.csv` (aggregate only; a copy is kept in `results/`) |
 | `tvof_fan_linkage.py` | Fan-level linkage workbook (one sheet per question); bridge columns fill in when the bridge file exists | `fan_linkage_<date>.xlsx` |
 | `tvof_column_overlap.py` | Every column against every column across the four tables, with a verdict per pair | `column_overlap_<date>.xlsx` |
 | `profile_dataset.py` | Draft profile sheet for one CSV or workbook sheet (the ten-step profiling framework) | console or `--out` markdown |
@@ -48,6 +49,7 @@ python tvof_peer_benchmarks.py
 python tvof_fan_statements.py
 python tvof_ltv_montecarlo.py
 python tvof_ltv_validation.py
+python tvof_results_table.py            # everything in one table -> results_master_<date>.xlsx + .csv
 
 # independent tools
 python tvof_fan_linkage.py
@@ -66,7 +68,7 @@ Python 3.9+ (developed on 3.12 with pandas 3.x), about 1.3 GB RAM peak, roughly 
 
 1. **Private repo only.** The code names the client and describes their data model.
 2. **Never commit data.** `.gitignore` blocks csv/xlsx/parquet, every `*_LOCAL_ONLY` file and all results workbooks. Check `git status` before every commit.
-3. **Results workbooks are aggregate only** and safe to share with the team; anything named `*_LOCAL_ONLY.*` is row level and re-identifying, so it stays in the data folder.
+3. **Results workbooks are aggregate only** and safe to share with the team; `results/` holds the stacked one-table copy of them (the only data files tracked here); anything named `*_LOCAL_ONLY.*` is row level and re-identifying, so it stays in the data folder.
 4. Anything AI-assisted gets verified by a person before it reaches the client.
 
 ## Data facts the scripts rely on

@@ -29,3 +29,7 @@ buyer_map_*
 __pycache__/
 .ipynb_checkpoints/
 .venv/
+# exception: aggregate results shared with the team (one stacked table of every results workbook; no row-level data)
+!results/
+!results/*.xlsx
+!results/*.csv
