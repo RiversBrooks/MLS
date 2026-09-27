@@ -6,8 +6,24 @@ data/
 *.parquet
 *.duckdb
 account_bridge_LOCAL_ONLY*
+fan_linkage_LOCAL_ONLY*
+scan_sale_join_*
+column_overlap_*
+fan_value_*
+fan_ltv_*
 TVOF_audit_results_*
 account_bridge_summary_*
+value_statements_*
+ltv_montecarlo_*
+ltv_validation_*
+peer_benchmarks_*
+insights_*
+activation_cohort_*
+Peer_Data_Audit_enriched_*
+home_games_by_match_*
+purchasers_by_zip_*
+table_connections_*
+buyer_map_*
 # exception: the hand-built event crosswalk (no personal data)
 !crosswalk_overrides_DRAFT.csv
 __pycache__/

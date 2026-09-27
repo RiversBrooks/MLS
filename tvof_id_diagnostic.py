@@ -13,10 +13,11 @@ NULLS = {"", "null", "nan", "none", "n/a", "na"}
 HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
-def find(d, word):
+def find(d: str, word: str) -> str:
     for f in glob.glob(os.path.join(d, "*.csv")):
         if word in os.path.basename(f).lower():
             return f
+    raise SystemExit(f"No CSV with '{word}' in its name found in {d}")
 
 
 def read_ids(path, cols, chunksize=200_000):
@@ -63,16 +64,16 @@ def main():
     samp = pd.read_csv(sal_f, dtype=str, keep_default_na=False, nrows=300_000)
     print(f"\n  sales header ({len(samp.columns)} cols): {list(samp.columns)}")
     idcols = [c for c in samp.columns
-              if samp[c].str.strip().str.len().between(32, 70).mean() > 0.5]
+            if samp[c].str.strip().str.len().between(32, 70).mean() > 0.5]
     print("\n2) EVERY ID-LIKE SALES COLUMN vs Fan/Attendance account IDs (first 300k sales rows)")
     FA = F | A
     for c in idcols:
         s = set(samp[c].str.strip()) - {""} - {x for x in samp[c] if x.lower() in NULLS}
         print(f"  {c:<26} {shape(s)}")
         print(f"      exact match to fan/att accounts: {len(s & FA):,}   "
-              f"lower(): {len({x.lower() for x in s} & FA):,}   upper(): {len({x.upper() for x in s} & FA):,}")
+            f"lower(): {len({x.lower() for x in s} & FA):,}   upper(): {len({x.upper() for x in s} & FA):,}")
         print(f"      match to fan.internal_fan_id: {len(s & fan.get('internal_fan_id', set())):,}   "
-              f"to fan.mls_id: {len(s & fan.get('mls_id', set())):,}")
+            f"to fan.mls_id: {len(s & fan.get('mls_id', set())):,}")
 
     print("\n3) FULL Sales.internal_account_id tests")
     S = next(iter(read_ids(sal_f, ["internal_account_id"]).values()))

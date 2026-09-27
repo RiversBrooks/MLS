@@ -1,5 +1,5 @@
 """
-Austin FC TVOF | Group 2 Data Audit Runner  (v2.5, 2026-09-22, memory-safe)
+Austin FC TVOF | Group 2 Data Audit Runner  (v2.7, 2026-09-25, memory-safe)
 -------------------------------------------------------------
 Runs the full audit on the four client CSVs LOCALLY and writes an
 AGGREGATE-ONLY Excel workbook (no row-level IDs, no hashed keys).
@@ -11,8 +11,8 @@ Requirements: pandas, openpyxl  (pip install pandas openpyxl)
 
 What it produces (in the data folder unless --out is given):
     TVOF_audit_results_<date>.xlsx   tabs: Run_Log, Column_Profile, Key_Checks,
-                                     Match_Rates, Quality_Checks, Dataset_Checks,
-                                     Event_Crosswalk, Reconciliation
+                                    Match_Rates, Quality_Checks, Dataset_Checks,
+                                    Event_Crosswalk, Reconciliation
 Nothing is modified in the source files.
 
 v2 (memory-safe): files are read in chunks; ID columns are stored as 64-bit
@@ -26,6 +26,7 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 from pandas.api.types import union_categoricals, CategoricalDtype
+from openpyxl.utils import get_column_letter
 
 # Categorical group keys must never expand to unobserved combinations
 # (pandas 2.x default observed=False can explode memory). Force observed=True.
@@ -41,6 +42,8 @@ DEFAULT_DIR = os.environ.get("TVOF_DATA_DIR", "./data")
 NULL_TOKENS = {"", "null", "nan", "none", "n/a", "na", "#n/a", "undefined"}
 Q2_CAPACITY = 20738            # from Group 2 MLS stadium audit
 CDT_OFFSET_H = 5               # UTC -> CDT (summer 2026)
+MAX_GAP_DAYS = 400             # crosswalk: an event more than this after the typical purchase is another season's match
+MIN_INFER_SEATS = 500          # crosswalk: undated products need at least this many sold seats to infer an event
 CHUNK = 100_000
 
 # Stored as uint64 hashes (joins/uniqueness work, strings not kept in memory)
@@ -71,17 +74,38 @@ def log(msg):
 
 
 # ------------------------------------------------------------------ loading
+def autofilter(path):
+    """Project convention: every table we produce is filterable on every column. Turns on Excel AutoFilter over the
+    used range of every sheet in the workbook and freezes the header row. Call it after each ExcelWriter block."""
+    from openpyxl import load_workbook
+    try:
+        wb = load_workbook(path)
+    except Exception as e:  # never let a cosmetic step break a run
+        log(f"  autofilter skipped for {os.path.basename(path)}: {e}")
+        return
+    for ws in wb.worksheets:
+        if ws.max_row > 1 and ws.max_column >= 1:
+            ws.auto_filter.ref = ws.dimensions
+            ws.freeze_panes = "A2"
+    wb.save(path)
+
+
 def find_files(data_dir):
-    csvs = glob.glob(os.path.join(data_dir, "*.csv"))
+    csvs = sorted(glob.glob(os.path.join(data_dir, "*.csv")))
+    # skip superseded copies, e.g. "..._2026_09_18 (OLD).csv"
+    csvs = [f for f in csvs if not re.search(r"\b(old|backup|bak|truncated)\b", os.path.basename(f).lower())]
+    # skip files these scripts write into the data folder (e.g. scan_sale_join_LOCAL_ONLY.csv matches "scan")
+    csvs = [f for f in csvs if not re.search(r"local_only|_summary|account_bridge|scan_sale_join|fan_value|column_overlap|home_games|purchasers_by_zip|peer_benchmarks|insights",
+                                             os.path.basename(f).lower())]
     found = {}
     for key in ["activation", "attendance", "sales", "fan"]:  # fan last: broadest word
-        for f in csvs:
-            name = os.path.basename(f).lower()
-            if f in found.values():
-                continue
-            if any(p in name for p in FILE_PATTERNS[key]):
-                found[key] = f
-                break
+        hits = [f for f in csvs if f not in found.values()
+                and any(p in os.path.basename(f).lower() for p in FILE_PATTERNS[key])]
+        if hits:
+            found[key] = hits[0]
+            if len(hits) > 1:
+                log(f"  WARNING: {len(hits)} files match '{key}'; using {os.path.basename(hits[0])}. "
+                    f"Pass --{key} or rename the others to be sure.")
     return found
 
 
@@ -165,7 +189,7 @@ def load(name, path, chunksize=CHUNK):
             out[c] = pd.concat(lst, ignore_index=True)
         else:
             out[c] = pd.Series(pd.concat([pd.Series(a) for a in lst], ignore_index=True))
-        parts[c] = None
+        parts[c] = []  # release chunk references
         gc.collect()
     df = pd.DataFrame(out, copy=False)
     del out
@@ -281,13 +305,39 @@ def seat_norm(s):
     return cat_apply(s, _seat_norm)
 
 
+# A 3-4 digit numeric zip is a 5-digit US zip that lost its leading zero(s) in export when the restored
+# prefix is one the US uses: 005 (Holtsville), 006-009 (PR/VI), 010-069 (New England), 070-089 (NJ), 090-098 (AE).
+US_ZIP3_RESTORED = ("005", "098")
+# Well-formed postal codes of other countries: valid addresses, just not US ZIPs.
+FOREIGN_POSTAL = (r"(?i)^(?:[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}"   # UK
+                  r"|[A-Z]\d[A-Z]\s?\d[A-Z]\d"                   # Canada
+                  r"|\d{4}\s?[A-Z]{2}"                           # Netherlands
+                  r"|\d{3}\s\d{2}"                               # Sweden
+                  r"|\d{5}-?\d{3}"                               # Brazil
+                  r"|\d{4}-\d{3}"                                # Portugal
+                  r"|\d{3}-?\d{4}"                               # Japan
+                  r"|\d{6}"                                      # India, China
+                  r"|[A-Z]\d{2}\s?[A-Z\d]{4})$")                 # Ireland
+
+
+def _restorable(z):
+    """3-4 digit numeric values whose zero-padded ZIP3 prefix is one the US uses."""
+    short = z.str.fullmatch(r"\d{3,4}", na=False)
+    p3 = z.str.zfill(5).str[:3]
+    return (short & p3.between(*US_ZIP3_RESTORED)).fillna(False).astype(bool)
+
+
 def _zip_class(z):
     z = z.astype("string").str.strip()
     out = pd.Series("missing", index=z.index, dtype=object)
     out[z.str.fullmatch(r"\d{5}", na=False)] = "5-digit"
     out[z.str.fullmatch(r"\d{5}-?\d{4}", na=False)] = "ZIP+4"
-    out[z.str.fullmatch(r"\d{3,4}", na=False)] = "3-4 digit (lost leading zero or non-US)"
-    out[z.notna() & (out == "missing")] = "non-US / malformed"
+    short = z.str.fullmatch(r"\d{3,4}", na=False)
+    rest = _restorable(z)
+    out[rest] = "5-digit (leading zero restored)"
+    out[short & ~rest] = "3-4 digit, not a US prefix"
+    out[(out == "missing") & z.str.fullmatch(FOREIGN_POSTAL, na=False).fillna(False).astype(bool)] = "non-US postal code (recognised format)"
+    out[z.notna() & (out == "missing")] = "malformed"
     return out
 
 
@@ -296,9 +346,10 @@ def zip_class(z):
 
 
 def _zip5(z):
+    """5-digit zip: ZIP+4 truncated, lost leading zeros restored; <NA> otherwise."""
     z = z.astype("string").str.strip()
     ok = z.str.fullmatch(r"\d{5}(-?\d{4})?", na=False)
-    return z.str[:5].where(ok).astype(object)
+    return z.str[:5].where(ok, z.str.zfill(5).where(_restorable(z))).astype(object)
 
 
 def zip5(z):
@@ -481,6 +532,7 @@ def check_sales(df):
         # Revenue reconciliation: three candidate definitions
         rec = [{"definition": "A. Naive SUM(total_payment) all rows  (DO NOT USE)", "rows": int(p.notna().sum()),
                 "amount": round(p.sum(), 2)}]
+        orig = True
         if it:
             orig = df[it].str.lower().isin(["ticket", "subscription"])
             rec.append({"definition": "B. Original sales only (item_type in Ticket, Subscription)",
@@ -500,7 +552,7 @@ def check_sales(df):
                         "rows": int(per["sub"].nunique()), "amount": round(per.groupby("sub").pa.max().sum(), 2)})
         if tdate:
             yr = to_dt(df[tdate]).dt.year
-            by = pd.DataFrame({"year": yr, "p": p, "orig": orig if it else True})
+            by = pd.DataFrame({"year": yr, "p": p, "orig": orig})
             y = by[by.orig].groupby("year").p.agg(["count", "sum"]).reset_index()
             y.columns = ["transaction_year", "original_sale_rows", "total_payment_sum"]
             RECON.append(("Sales_Revenue_by_Year", y))
@@ -517,8 +569,8 @@ def check_sales(df):
         if plan and sub and it:
             ps = pd.DataFrame({"sub": df[sub], "is_plan_row": df[it].astype(object).str.lower().eq("subscription"),
                                "pa": to_num(df[plan]), "pay": p}).dropna(subset=["sub"])
-            g = ps.groupby(["sub", "is_plan_row"]).agg(n=("pa", "size"), pa_sum=("pa", "sum"),
-                                                      pa_max=("pa", "max"), pay_sum=("pay", "sum")).unstack()
+            g = pd.DataFrame(ps.groupby(["sub", "is_plan_row"]).agg(n=("pa", "size"), pa_sum=("pa", "sum"),
+                                                                   pa_max=("pa", "max"), pay_sum=("pay", "sum")).unstack())
             g.columns = [f"{a}_{'plan' if b else 'game'}" for a, b in g.columns]
             summ = [{"metric": c_, "plans_with_value": int(g[c_].notna().sum()),
                      "total": round(float(g[c_].sum()), 2), "median_per_plan": round(float(g[c_].median()), 2)}
@@ -642,11 +694,9 @@ CROSSWALK = None        # set by crosswalk_and_seats (product_id -> EventKey, co
 ACCOUNT_BRIDGE = None   # sales-hash -> fan-space-hash (UInt64), set by --account-bridge
 
 
-def final_holder_frame(sal, pmap):
-    """One row per (EventKey, seat): the latest valid holder row for match tickets.
-    Drops: plan rows, seller rows marked Resold, transfers still Pending or Canceled."""
-    p, it, ts, rs = col(sal, "product_id"), col(sal, "item_type"), col(sal, "transfer_status"), col(sal, "resale_status")
-    td, acct = col(sal, "transaction_date"), col(sal, "internal_account_id")
+def _holder_mask(sal):
+    """Rows that can hold a seat: not plan rows, not seller rows marked Resold, not Pending/Canceled transfers."""
+    it, ts, rs = col(sal, "item_type"), col(sal, "transfer_status"), col(sal, "resale_status")
     ok = pd.Series(True, index=sal.index)
     if it:
         ok &= ~sal[it].astype(object).str.lower().eq("subscription").fillna(False)
@@ -655,7 +705,14 @@ def final_holder_frame(sal, pmap):
     if ts and it:
         ok &= ~(sal[it].astype(object).str.lower().eq("transfer").fillna(False)
                 & sal[ts].astype(object).str.lower().isin(["pending", "canceled", "cancelled"]).fillna(False))
-    ok &= sal[p].isin(pmap.index)
+    return ok
+
+
+def final_holder_frame(sal, pmap):
+    """One row per (EventKey, seat): the latest valid holder row for match tickets.
+    Drops: plan rows, seller rows marked Resold, transfers still Pending or Canceled."""
+    p, td, acct = col(sal, "product_id"), col(sal, "transaction_date"), col(sal, "internal_account_id")
+    ok = _holder_mask(sal) & sal[p].isin(pmap.index)
     idx = ok.to_numpy()
     T = pd.DataFrame({"product_id": sal[p].astype(object).to_numpy()[idx],
                       "key": seat_key(sal[col(sal, "section")], sal[col(sal, "row")], sal[col(sal, "seat")])[idx],
@@ -670,8 +727,10 @@ def final_holder_frame(sal, pmap):
 def product_class(d):
     d = str(d)
     if re.search(r"PRK|parking", d, re.I): return "parking"
-    if re.search(r"\d+\s*(EXT|FB)\b", d, re.I): return "match add-on (EXT/FB)"
+    if re.search(r"\d+\s*(EXT|FB)\b|^(EXT|FB)\b", d, re.I): return "match add-on (EXT/FB)"
     if re.search(r"membership|full season|extra game|deposit", d, re.I): return "plan/membership"
+    if re.search(r"FC2\b|Austin FC II\b|at Austin FC I$", d): return "Austin FC II match (not at Q2)"
+    if re.search(r"party", d, re.I): return "other stadium event"
     if re.search(r"at Austin FC|playoff|round \d", d, re.I): return "Austin FC match"
     return "other stadium event"
 
@@ -727,21 +786,103 @@ def crosswalk_and_seats(sal, att):
     C = C.sort_values(["product_id", "gap"]).drop_duplicates("product_id")
     C["opp_overlap"] = [len(_tokens(a) & _tokens(b)) for a, b in zip(C.desc, C.name)]
     X = P.merge(C[["product_id", "EventKey", "date", "name", "gap", "opp_overlap"]], on="product_id", how="left")
+    X["EventKey"] = X.EventKey.map(lambda v: None if pd.isna(v) else str(v)).astype(object)
+    emap = E.assign(k=E.EventKey.astype(str)).set_index("k")
+    X["override"] = False
     if OVERRIDES is not None:
         ov = OVERRIDES.set_index("product_id").EventKey.astype(str)
         hit = X.product_id.isin(ov.index)
-        emap = E.set_index(E.EventKey.astype(str))
-        X["EventKey"] = X.EventKey.where(X.EventKey.isna(), X.EventKey.astype(str)).astype(object)
         X.loc[hit, "EventKey"] = X.loc[hit, "product_id"].map(ov)
         X.loc[hit, "date"] = X.loc[hit, "EventKey"].map(emap.date)
         X.loc[hit, "name"] = X.loc[hit, "EventKey"].map(emap.name)
+        X.loc[hit, "override"] = True
         log(f"  applied {int(hit.sum())} crosswalk overrides")
     X["product_class"] = X.desc.map(product_class)
+    # purchase-timing gate: a same-M/D event more than MAX_GAP_DAYS after the typical purchase is another season's match
+    X["gap"] = (X.date - X.tx_med).dt.days
+    too_far = (X.EventKey.notna() & ~X.override & X.gap.gt(MAX_GAP_DAYS)).to_numpy(dtype=bool)
+    X.loc[too_far, "EventKey"] = None
+    X.loc[too_far, "date"] = pd.NaT
+    X.loc[too_far, "name"] = None
     X["reason"] = np.where(X.m.isna(), "no M/D in description (plan, parking, non-game?)",
-                           np.where(X.EventKey.isna(), "M/D found but no attendance event on that date", "mapped"))
+                  np.where(too_far, f"M/D matched only an event more than {MAX_GAP_DAYS} days after purchase (other season)",
+                  np.where(X.EventKey.isna(), "M/D found but no attendance event on that date", "mapped")))
 
-    # ---- 2. validate mapping with seats actually scanned
-    X["EventKey"] = X.EventKey.astype(object)
+    # attendance: unique scanned seats per event
+    Au = pd.DataFrame({"EventKey": att[ek].astype(str), "key": seat_key(att[asec], att[arow], att[aseat]),
+                       "acct": att[aacct] if aacct else pd.NA}).dropna(subset=["EventKey", "key"])
+    Au = Au.drop_duplicates(["EventKey", "key"])
+
+    # ---- 1b. undated match products: infer the event from the seats that were scanned (conservative, flagged for review)
+    undated = X[X.m.isna() & X.EventKey.isna() & X.product_class.eq("Austin FC match") & X.tx_med.notna()]
+    inferred = {}
+    if len(undated):
+        ev_seats = {k: set(g.key.to_numpy()) for k, g in Au.groupby("EventKey")}
+        hold = _holder_mask(sal).to_numpy()
+        is_cat = hasattr(sal[p], "cat")
+        codes = sal[p].cat.codes.to_numpy() if is_cat else sal[p].astype(object).to_numpy()
+        for r in undated.itertuples():
+            if is_cat:
+                if r.product_id not in sal[p].cat.categories:
+                    continue
+                rows = hold & (codes == sal[p].cat.categories.get_loc(r.product_id))
+            else:
+                rows = hold & (codes == r.product_id)
+            if rows.sum() < MIN_INFER_SEATS:
+                continue
+            keys = set(pd.Series(seat_key(sal[ssec][rows], sal[srow][rows], sal[sseat][rows])).dropna().unique())
+            if len(keys) < MIN_INFER_SEATS:
+                continue
+            lo, hi = r.tx_med - pd.Timedelta(days=30), r.tx_med + pd.Timedelta(days=MAX_GAP_DAYS)
+            scores = []
+            for e in E[(E.date >= lo) & (E.date <= hi)].itertuples():
+                es = ev_seats.get(str(e.EventKey))
+                if es:
+                    o = len(keys & es)
+                    scores.append((o / len(es), o / len(keys), str(e.EventKey)))
+            scores.sort(reverse=True)
+            if len(scores) >= 2 and scores[0][0] >= 0.8 and scores[0][1] >= 0.4 and scores[1][0] <= 0.5:
+                inferred[r.product_id] = scores[0][2]
+        if inferred:
+            m_ = X.product_id.isin(inferred)
+            X.loc[m_, "EventKey"] = X.loc[m_, "product_id"].map(inferred)
+            X.loc[m_, "date"] = X.loc[m_, "EventKey"].map(emap.date)
+            X.loc[m_, "name"] = X.loc[m_, "EventKey"].map(emap.name)
+            X.loc[m_, "reason"] = "no M/D; event inferred from scanned seats (review)"
+            log(f"  seat-inferred {len(inferred)} undated match products")
+    X["inferred"] = X.product_id.isin(inferred)
+    X["opp_overlap"] = [len(_tokens(a) & _tokens(b)) if isinstance(b, str) else np.nan for a, b in zip(X.desc, X.name)]
+    # why is there no event for the unmapped match products? (drives the "of available events" match rate)
+    att_min, att_max = E.date.min(), E.date.max()
+
+    def _avail(r):
+        if r.product_class != "Austin FC match":
+            return "not a Q2 match product"
+        if pd.notna(r.EventKey):
+            return "event available"
+        if pd.isna(r.m) or pd.isna(r.tx_med):
+            return "no date in description and no seat-inferable event"
+        # first calendar date with this month/day on or after the typical purchase (minus a month)
+        y0 = (r.tx_med - pd.Timedelta(days=7)).year
+        est = None
+        for y in (y0, y0 + 1, y0 + 2):
+            try:
+                cand = pd.Timestamp(year=y, month=int(r.m), day=int(r.d))
+            except ValueError:
+                continue
+            if cand >= r.tx_med - pd.Timedelta(days=7):   # purchases sit before the match; Nov-Dec renewals are for next season
+                est = cand
+                break
+        if est is None:
+            return "date could not be placed"
+        if est < att_min:
+            return f"event before attendance coverage (starts {att_min:%Y-%m-%d})"
+        if est > att_max:
+            return f"event after the data window (ends {att_max:%Y-%m-%d})"
+        return "event missing from the attendance export"
+    X["availability"] = X.apply(_avail, axis=1)
+
+    # ---- 2. validate every mapping with the seats actually scanned
     pmap = X[X.product_class.eq("Austin FC match")].dropna(subset=["EventKey"]).set_index("product_id").EventKey
     if pmap.empty:
         RECON.append(("Event_Crosswalk", X))
@@ -749,26 +890,34 @@ def crosswalk_and_seats(sal, att):
           "No product_description contained a parsable M/D date. Seat-level checks skipped; see Event_Crosswalk.")
         return
     T = final_holder_frame(sal, pmap)
-    Au = pd.DataFrame({"EventKey": att[ek].astype(str), "key": seat_key(att[asec], att[arow], att[aseat]),
-                       "acct": att[aacct] if aacct else pd.NA}).dropna(subset=["EventKey", "key"])
-    Au = Au.drop_duplicates(["EventKey", "key"])
     mt = T.merge(Au[["EventKey", "key"]].assign(scanned=True), on=["EventKey", "key"], how="left")
     v = mt.groupby("product_id").agg(sold_seats=("key", "size"), scanned_seats=("scanned", "count")).reset_index()
     X = X.merge(v, on="product_id", how="left")
     X["seat_scan_share"] = (X.scanned_seats / X.sold_seats).round(4)
-    X["confidence"] = np.select(
-        [X.EventKey.isna().to_numpy(),
-         ((X.seat_scan_share.fillna(0) >= 0.4) & (X.opp_overlap.fillna(0) > 0)).to_numpy(dtype=bool),
-         (X.seat_scan_share.fillna(0) >= 0.4).to_numpy(dtype=bool)],
-        ["Unmapped - review", "High", "Medium"], "Low - review")
-    if OVERRIDES is not None:
-        X.loc[X.product_id.isin(set(OVERRIDES.product_id)) & X.EventKey.notna(), "confidence"] = "Manual override"
+    X["event_scanned_seats"] = X.EventKey.map(Au.groupby("EventKey").size())
+    X["event_side_share"] = (X.scanned_seats / X.event_scanned_seats).round(4)
+    share, eside, nsc = X.seat_scan_share.fillna(0), X.event_side_share.fillna(0), X.scanned_seats.fillna(0)
+    named = X.opp_overlap.fillna(0) > 0
+    date_match = X.m.notna() & X.date.notna() & (X.m == X.date.dt.month) & (X.d == X.date.dt.day)
+    seat_ok = (share >= 0.4) | ((eside >= 0.8) & (nsc >= 100))
+    conds = [X.EventKey.isna().to_numpy(dtype=bool), (seat_ok & named).to_numpy(dtype=bool), seat_ok.to_numpy(dtype=bool),
+             (date_match & named).to_numpy(dtype=bool), X.override.to_numpy(dtype=bool)]
+    X["confidence"] = np.select(conds, ["Unmapped - review", "High", "Medium", "Medium", "Manual override"], "Low - review")
+    X["basis"] = np.select(conds, ["", "seats scanned + opponent name", "seats scanned (product or event side)",
+                                   "date + opponent name; scans too sparse to validate", "manual override; seat evidence weak"],
+                           "weak evidence")
+    ovm = (X.override & X.EventKey.notna() & X.confidence.ne("Manual override")).to_numpy(dtype=bool)
+    X.loc[ovm, "basis"] = "manual override, validated by " + X.loc[ovm, "basis"]
+    inf = X.inferred.to_numpy(dtype=bool)
+    X.loc[inf, "basis"] = "seat-inferred, no date in description; " + X.loc[inf, "basis"]
     X.loc[X.product_class.ne("Austin FC match") & X.EventKey.notna(), "confidence"] = "Not a match ticket (excluded)"
     X = X[["desc", "product_class", "product_id", "rows", "tx_med", "EventKey", "date", "name", "opp_overlap",
-           "sold_seats", "scanned_seats", "seat_scan_share", "confidence", "reason"]]
+           "sold_seats", "scanned_seats", "seat_scan_share", "event_scanned_seats", "event_side_share",
+           "confidence", "basis", "override", "inferred", "reason", "availability"]]
     X.columns = ["sales_product_description", "product_class", "product_id", "sales_rows", "median_transaction_date", "EventKey",
                  "event_date", "attendance_MasterEventName", "opponent_word_overlap", "sold_seats_final_holder",
-                 "of_which_scanned", "seat_scan_share", "confidence", "reason"]
+                 "of_which_scanned", "seat_scan_share", "event_scanned_seats", "event_side_share",
+                 "confidence", "basis", "manual_override", "seat_inferred", "reason", "event_availability"]
     global CROSSWALK
     CROSSWALK = X
     RECON.append(("Event_Crosswalk", X.sort_values(["event_date", "sales_product_description"])))
@@ -776,6 +925,13 @@ def crosswalk_and_seats(sal, att):
     q("cross", "Austin FC match products mapped to an attendance EventKey (High/Medium/Override)",
       int(X.confidence.isin(TRUST).sum()), int(X.product_class.eq("Austin FC match").sum()), "High",
       "Unmapped = plans/non-game products or events outside attendance coverage; review Event_Crosswalk.")
+    isq = X.product_class.eq("Austin FC match")
+    avail = isq & ~X.event_availability.str.startswith(("event before", "event after"))
+    q("cross", "Austin FC match products mapped, of those whose event falls inside attendance coverage",
+      int((isq & X.confidence.isin(TRUST)).sum()), int(avail.sum()), "High",
+      "Excludes products for 2021 matches and for fixtures after the data window; the remainder unmapped are events missing from the attendance export.")
+    q("cross", "Austin FC match product rows mapped, of rows whose event falls inside attendance coverage",
+      int(X.sales_rows[isq & X.confidence.isin(TRUST)].sum()), int(X.sales_rows[avail].sum()), "Info")
     q("cross", "attendance EventKeys with no mapped sales product",
       int((~E.EventKey.astype(str).isin(set(X.loc[X.confidence.isin(TRUST), "EventKey"].dropna().astype(str)))).sum()),
       len(E), "High", "Fill these via --crosswalk-overrides (product_id,EventKey CSV).")
@@ -898,10 +1054,11 @@ def main():
         for name, t in RECON:
             t.to_excel(xw, sheet_name=name[:31], index=False)
         for ws in xw.book.worksheets:
-            for c in ws.columns:
-                ws.column_dimensions[c[0].column_letter].width = min(
+            for i, c in enumerate(ws.columns, start=1):
+                ws.column_dimensions[get_column_letter(i)].width = min(
                     60, max(10, max(len(str(x.value or "")) for x in c[:200]) + 2))
             ws.freeze_panes = "A2"
+    autofilter(out)
     log(f"Wrote {out}  (aggregate only: no row-level IDs)")
 
 
