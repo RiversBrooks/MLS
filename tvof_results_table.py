@@ -34,7 +34,7 @@ import tvof_data_audit as A   # noqa: E402
 # kinds of results workbook -> file-name prefix (latest dated file of each is used; _HHMM copies sort last, so they win)
 WORKBOOKS = ["TVOF_audit_results", "account_bridge_summary", "scan_sale_join_summary", "column_overlap", "fan_value_summary",
              "fan_ltv", "peer_benchmarks", "value_statements", "ltv_montecarlo", "ltv_validation", "insights",
-             "activation_cohort", "Peer_Data_Audit_enriched", "fan_linkage"]
+             "activation_cohort", "Peer_Data_Audit_enriched", "fan_linkage", "analyst_models"]
 CSVS = ["home_games_by_match", "purchasers_by_zip"]
 EXCEL_MAX_ROWS = 1_048_575
 

@@ -18,6 +18,7 @@ Reproducible audit and fan-value pipeline over the four client CSVs (Fan Info, W
 | `tvof_fan_statements.py` | Five value statements: fan contribution, cohort revenue triangle, revenue bridge 2022 to 2025, capacity utilization, customer equity | `value_statements_<date>.xlsx` |
 | `tvof_ltv_montecarlo.py` | 20,000-run Monte Carlo around the LTV and customer-equity point estimates | `ltv_montecarlo_<date>.xlsx` |
 | `tvof_ltv_validation.py` | Rolling-origin backtest of the chain ladder and the Monte Carlo, tornado sensitivity, Sobol variance decomposition | `ltv_validation_<date>.xlsx` |
+| `tvof_analyst_models.py` | Five models past the chain ladder: state-transition (Markov) model, usage and renewal, transfer network, resale premium, activation uplift with a placebo year. Reads the four files once into a local cache, then runs in seconds | `analyst_models_<date>.xlsx` (aggregate only) + `analyst_models_cache_LOCAL_ONLY.pkl` (row level by account code, keep local) |
 | `tvof_results_table.py` | Stacks every sheet of the latest results workbook of each kind (plus the small aggregate CSVs) into one long table that filters on every column | `results_master_<date>.xlsx` + `.csv` (aggregate only; a copy is kept in `results/`) |
 | `tvof_fan_linkage.py` | Fan-level linkage workbook (one sheet per question); bridge columns fill in when the bridge file exists | `fan_linkage_<date>.xlsx` |
 | `tvof_column_overlap.py` | Every column against every column across the four tables, with a verdict per pair | `column_overlap_<date>.xlsx` |
@@ -49,6 +50,7 @@ python tvof_peer_benchmarks.py
 python tvof_fan_statements.py
 python tvof_ltv_montecarlo.py
 python tvof_ltv_validation.py
+python tvof_analyst_models.py [--refresh]   # five analyst models; --refresh rebuilds the cache from the client files (about ten minutes)
 python tvof_results_table.py            # everything in one table -> results_master_<date>.xlsx + .csv
 
 # independent tools
